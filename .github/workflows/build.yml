@@ -35,7 +35,7 @@ jobs:
         working-directory: kernel
         run: |
           rm -rf drivers/kernelsu
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s v1.1.1
           echo "--- KernelSU-Next Kconfig symbols ---"
           grep -E "^config" drivers/kernelsu/Kconfig | head -20 || \
             find drivers/kernelsu -maxdepth 2 -name "Kconfig" -exec grep -hE "^config" {} \; | head -20
@@ -78,7 +78,7 @@ jobs:
           make O=out ARCH=arm64 olddefconfig
 
           echo "--- final KSU config ---"
-          grep -E "^CONFIG_(KSU|KPROBES|EXT4_FS)" out/.config || true
+          grep -E "^CONFIG_(KSU|KPROBES|KSU_KPROBES_HOOK|OVERLAY_FS|EXT4_FS)" out/.config || true
 
       - name: Build kernel Image
         working-directory: kernel
