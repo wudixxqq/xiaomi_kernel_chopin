@@ -1,4 +1,4 @@
-name: Build chopin kernel (Android 13 + KernelSU-Next)
+name: Build chopin kernel (Android 13)
 
 on:
   workflow_dispatch:
@@ -31,15 +31,6 @@ jobs:
           ref: ${{ inputs.kernel_ref }}
           path: kernel
 
-      - name: Setup KernelSU-Next
-        working-directory: kernel
-        run: |
-          rm -rf drivers/kernelsu
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s v1.1.1
-          echo "--- KernelSU-Next Kconfig symbols ---"
-          grep -E "^config" drivers/kernelsu/Kconfig | head -20 || \
-            find drivers/kernelsu -maxdepth 2 -name "Kconfig" -exec grep -hE "^config" {} \; | head -20
-
       - name: Download stock boot image
         run: |
           mkdir -p boot
@@ -56,6 +47,107 @@ jobs:
             build-essential flex bison libssl-dev libelf-dev \
             bc cpio rsync zip unzip ccache python3
 
+      - name: Setup KernelSU-Next v3.4.0-legacy (manual hook build for 4.14)
+        working-directory: kernel
+        run: |
+          rm -rf drivers/kernelsu
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s v3.4.0-legacy
+          grep -E "config KSU|config KSU_MANUAL_HOOK" drivers/kernelsu/Kconfig || true
+
+      - name: Adapt kernel manual hooks for KSU-Next v3.x
+        working-directory: kernel
+        run: |
+          python3 - <<'EOF'
+          import sys
+
+          def load(p):
+              with open(p) as f:
+                  return f.readlines()
+
+          def save(p, lines):
+              with open(p, 'w') as f:
+                  f.writelines(lines)
+
+          def strip_ksu_blocks(path, markers, expect):
+              lines = load(path)
+              out, i, removed = [], 0, 0
+              while i < len(lines):
+                  if lines[i].strip() == '#ifdef CONFIG_KSU':
+                      j, depth = i, 1
+                      while j + 1 < len(lines) and depth:
+                          j += 1
+                          s = lines[j].strip()
+                          if s.startswith('#if'):
+                              depth += 1
+                          elif s == '#endif':
+                              depth -= 1
+                      text = ''.join(lines[i:j+1])
+                      if any(m in text for m in markers):
+                          removed += 1
+                          i = j + 1
+                          continue
+                  out.append(lines[i])
+                  i += 1
+              save(path, out)
+              print(path, 'removed blocks:', removed)
+              assert removed == expect, path
+
+          # 1. fs/read_write.c: vfs_read hook not used by KSU-Next v3.x
+          strip_ksu_blocks('fs/read_write.c', ['ksu_vfs_read_hook'], 2)
+
+          # 2. drivers/input/input.c: input hook not used by KSU-Next v3.x
+          strip_ksu_blocks('drivers/input/input.c', ['ksu_input_hook'], 2)
+
+          # 3. fs/exec.c: drop bool gate, single ksu_handle_execveat() call
+          #    (v3.x ksu_handle_execveat dispatches ksud + sucompat internally)
+          p = 'fs/exec.c'
+          lines = load(p)
+          lines = [l for l in lines if 'extern bool ksu_execveat_hook' not in l]
+          out, i, replaced = [], 0, 0
+          while i < len(lines):
+              l = lines[i]
+              if 'if (unlikely(ksu_execveat_hook))' in l:
+                  indent = l[:len(l) - len(l.lstrip())]
+                  j = i + 1
+                  while j < len(lines) and 'ksu_handle_execveat_sucompat(&fd' not in lines[j]:
+                      j += 1
+                  out.append(indent + 'ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n')
+                  replaced += 1
+                  i = j + 1
+                  continue
+              out.append(l)
+              i += 1
+          save(p, out)
+          print('fs/exec.c gate replaced:', replaced)
+          assert replaced == 1
+
+          # 4. kernel/reboot.c: supercall entry, the manager<->kernel channel
+          p = 'kernel/reboot.c'
+          src = ''.join(load(p))
+          anchor = 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'
+          assert anchor in src, 'reboot anchor missing'
+          ins = ('#ifdef CONFIG_KSU\n'
+                 'extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n'
+                 '#endif\n')
+          idx = src.index(anchor)
+          src = src[:idx] + ins + src[idx:]
+          idx2 = src.index('SYSCALL_DEFINE4(reboot')
+          seg = src[idx2:]
+          a2 = 'int ret = 0;'
+          k = seg.index(a2) + len(a2)
+          call = '\n#ifdef CONFIG_KSU\n        ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif'
+          src = src[:idx2 + k] + call + src[idx2 + k:]
+          save(p, [src])
+          assert src.count('ksu_handle_sys_reboot') == 2
+          print('kernel/reboot.c patched')
+
+          print('ALL PATCHES OK')
+          EOF
+          echo "--- verify ---"
+          grep -n "ksu_handle_execveat(&fd" fs/exec.c
+          ! grep -rn "ksu_vfs_read_hook\|ksu_input_hook\|ksu_execveat_hook" fs/ drivers/input/ || true
+          grep -n "ksu_handle_sys_reboot" kernel/reboot.c
+
       - name: Configure kernel
         working-directory: kernel
         run: |
@@ -71,14 +163,10 @@ jobs:
             -d COMMON_CLK_MT8183 \
             -d PINCTRL_MT8183 \
             -d MTK_AEE_IPANIC
-
-          # KernelSU-Next depends on KPROBES && EXT4_FS (defconfig has KPROBES off)
-          scripts/config --file out/.config -e KPROBES -e KPROBE_EVENTS -e KSU
-
+          # KSU-Next v3.4.0-legacy: manual hook mode (kprobe hook path needs >=5.10)
+          scripts/config --file out/.config -e KPROBES -e KPROBE_EVENTS -e KSU -e KSU_MANUAL_HOOK
           make O=out ARCH=arm64 olddefconfig
-
-          echo "--- final KSU config ---"
-          grep -E "^CONFIG_(KSU|KPROBES|KSU_KPROBES_HOOK|OVERLAY_FS|EXT4_FS)" out/.config || true
+          grep -E "^CONFIG_(KSU|KSU_MANUAL_HOOK|KPROBES|OVERLAY_FS|EXT4_FS)" out/.config || true
 
       - name: Build kernel Image
         working-directory: kernel
@@ -129,4 +217,4 @@ jobs:
             work/boot-chopin-a13.img \
             work/boot-chopin-a13.img.sha256 \
             --title "chopin Android 13 kernel + KernelSU-Next ($tag)" \
-            --notes "kernel: ${{ inputs.kernel_ref }} + KernelSU-Next (SUSFS) | boot base: MIUI V14.0.8.0.TKPCNXM"
+            --notes "kernel: ${{ inputs.kernel_ref }} | KSU-Next: v3.4.0-legacy (manual hook) | boot base: MIUI V14.0.8.0.TKPCNXM"
