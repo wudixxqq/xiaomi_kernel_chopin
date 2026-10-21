@@ -1,0 +1,116 @@
+name: Build chopin kernel (Android 13)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: "Branch to build"
+        required: true
+        default: "4.14.186-A13"
+      create_release:
+        description: "Create a GitHub Release with the boot image"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  BOOT_ZIP_URL: "https://github.com/wudixxqq/xiaomi_kernel_chopin/releases/download/ci-assets/boot.zip"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.kernel_ref }}
+          path: kernel
+
+      - name: Download stock boot image
+        run: |
+          mkdir -p boot
+          curl -L --fail --retry 3 -o boot/boot.zip "$BOOT_ZIP_URL"
+          ls -lh boot/boot.zip
+
+      - name: Install toolchain and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-13 lld-13 llvm-13 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
+            build-essential flex bison libssl-dev libelf-dev \
+            bc cpio rsync zip unzip ccache python3
+
+      - name: Configure kernel
+        working-directory: kernel
+        run: |
+          make O=out ARCH=arm64 CC="ccache clang-13" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            chopin_defconfig
+
+          scripts/config --file out/.config --set-str LOCALVERSION "-chopin-a13"
+          scripts/config --file out/.config -d DEBUG_INFO
+          scripts/config --file out/.config \
+            -d COMMON_CLK_MT8168 \
+            -d COMMON_CLK_MT8183 \
+            -d PINCTRL_MT8183 \
+            -d MTK_AEE_IPANIC
+
+          make O=out ARCH=arm64 olddefconfig
+
+      - name: Build kernel Image
+        working-directory: kernel
+        run: |
+          make O=out ARCH=arm64 -j$(nproc) CC="ccache clang-13" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            KCFLAGS="-w" Image
+
+      - name: Prepare magiskboot
+        run: |
+          curl -L --fail --retry 3 -o magisk.apk \
+            "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk"
+          unzip -o magisk.apk "lib/x86_64/libmagiskboot.so" -d mb
+          cp mb/lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+          ./magiskboot 2>&1 | head -5 || true
+
+      - name: Repack boot.img with new kernel
+        run: |
+          mkdir -p work
+          cd work
+          unzip -o ../boot/boot.zip
+          ../magiskboot unpack boot.img
+          cp ../kernel/out/arch/arm64/boot/Image kernel
+          ../magiskboot repack boot.img boot-chopin-a13.img
+          sha256sum boot-chopin-a13.img > boot-chopin-a13.img.sha256
+          ls -lh boot.img boot-chopin-a13.img kernel
+          cat boot-chopin-a13.img.sha256
+
+      - name: Upload boot image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-chopin-a13
+          path: |
+            work/boot-chopin-a13.img
+            work/boot-chopin-a13.img.sha256
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: inputs.create_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-$(date +%Y%m%d-%H%M%S)"
+          gh release create "$tag" \
+            work/boot-chopin-a13.img \
+            work/boot-chopin-a13.img.sha256 \
+            --title "chopin Android 13 kernel ($tag)" \
+            --notes "kernel: ${{ inputs.kernel_ref }} | boot base: MIUI V14.0.8.0.TKPCNXM"
