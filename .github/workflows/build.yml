@@ -58,21 +58,28 @@ jobs:
         working-directory: kernel
         run: |
           python3 - <<'EOF'
-          import sys
+          import os, re, sys
 
-          def load(p):
-              with open(p) as f:
-                  return f.readlines()
+          DISALLOW = ['ksu_vfs_read_hook', 'ksu_input_hook', 'ksu_execveat_hook',
+                      'ksu_handle_vfs_read', 'ksu_handle_input_handle_event',
+                      'ksu_handle_devpts', 'ksu_handle_faccessat', 'ksu_handle_stat']
 
-          def save(p, lines):
-              with open(p, 'w') as f:
-                  f.writelines(lines)
+          BLOCK_START = re.compile(r'#(ifdef\s+CONFIG_KSU\s*|if\s+defined\(CONFIG_KSU\)\s*)$')
 
-          def strip_ksu_blocks(path, markers, expect):
-              lines = load(path)
+          def iter_sources():
+              for root, dirs, files in os.walk('.'):
+                  dirs[:] = [d for d in dirs
+                             if d not in ('out', '.git', 'KernelSU-Next')]
+                  for fn in files:
+                      if fn.endswith(('.c', '.h')):
+                          yield os.path.join(root, fn)
+
+          def strip_blocks(path):
+              with open(path) as f:
+                  lines = f.readlines()
               out, i, removed = [], 0, 0
               while i < len(lines):
-                  if lines[i].strip() == '#ifdef CONFIG_KSU':
+                  if BLOCK_START.match(lines[i].strip()):
                       j, depth = i, 1
                       while j + 1 < len(lines) and depth:
                           j += 1
@@ -82,26 +89,20 @@ jobs:
                           elif s == '#endif':
                               depth -= 1
                       text = ''.join(lines[i:j+1])
-                      if any(m in text for m in markers):
+                      if any(m in text for m in DISALLOW):
                           removed += 1
                           i = j + 1
                           continue
                   out.append(lines[i])
                   i += 1
-              save(path, out)
-              print(path, 'removed blocks:', removed)
-              assert removed == expect, path
+              if removed:
+                  with open(path, 'w') as f:
+                      f.writelines(out)
+              return removed
 
-          # 1. fs/read_write.c: vfs_read hook not used by KSU-Next v3.x
-          strip_ksu_blocks('fs/read_write.c', ['ksu_vfs_read_hook'], 2)
-
-          # 2. drivers/input/input.c: input hook not used by KSU-Next v3.x
-          strip_ksu_blocks('drivers/input/input.c', ['ksu_input_hook'], 2)
-
-          # 3. fs/exec.c: drop bool gate, single ksu_handle_execveat() call
-          #    (v3.x ksu_handle_execveat dispatches ksud + sucompat internally)
+          # --- Phase 1: fs/exec.c gate replacement (before tree-wide strip) ---
           p = 'fs/exec.c'
-          lines = load(p)
+          lines = open(p).readlines()
           lines = [l for l in lines if 'extern bool ksu_execveat_hook' not in l]
           out, i, replaced = [], 0, 0
           while i < len(lines):
@@ -117,13 +118,26 @@ jobs:
                   continue
               out.append(l)
               i += 1
-          save(p, out)
+          assert replaced == 1, 'exec.c gate not found'
+          open(p, 'w').writelines(out)
           print('fs/exec.c gate replaced:', replaced)
-          assert replaced == 1
 
-          # 4. kernel/reboot.c: supercall entry, the manager<->kernel channel
+          # --- Phase 2: strip all unsupported #ifdef CONFIG_KSU hooks tree-wide ---
+          total, touched = 0, []
+          for path in iter_sources():
+              with open(path) as f:
+                  src = f.read()
+              if 'CONFIG_KSU' not in src:
+                  continue
+              n = strip_blocks(path)
+              if n:
+                  total += n
+                  touched.append('%s(%d)' % (path, n))
+          print('stripped blocks:', total, touched)
+
+          # --- Phase 3: kernel/reboot.c supercall entry (manager channel) ---
           p = 'kernel/reboot.c'
-          src = ''.join(load(p))
+          src = ''.join(open(p).readlines())
           anchor = 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'
           assert anchor in src, 'reboot anchor missing'
           ins = ('#ifdef CONFIG_KSU\n'
@@ -137,16 +151,31 @@ jobs:
           k = seg.index(a2) + len(a2)
           call = '\n#ifdef CONFIG_KSU\n        ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif'
           src = src[:idx2 + k] + call + src[idx2 + k:]
-          save(p, [src])
+          open(p, 'w').write(src)
           assert src.count('ksu_handle_sys_reboot') == 2
           print('kernel/reboot.c patched')
 
-          print('ALL PATCHES OK')
+          # --- Phase 4: full-tree verification, fail fast on leftovers ---
+          allowed = ('./fs/exec.c', './kernel/reboot.c')
+          bad = []
+          for path in iter_sources():
+              if path.replace('\\', '/') in allowed:
+                  continue
+              with open(path) as f:
+                  for ln, line in enumerate(f, 1):
+                      if ('ksu_handle' in line or 'ksu_execveat_hook' in line or
+                              'ksu_vfs_read_hook' in line or 'ksu_input_hook' in line):
+                          bad.append('%s:%d: %s' % (path, ln, line.strip()))
+          if bad:
+              print('LEFTOVER KSU HOOKS:')
+              print('\n'.join(bad))
+              sys.exit(1)
+          print('VERIFICATION CLEAN')
           EOF
           echo "--- verify ---"
           grep -n "ksu_handle_execveat(&fd" fs/exec.c
-          ! grep -rn "ksu_vfs_read_hook\|ksu_input_hook\|ksu_execveat_hook" fs/ drivers/input/ || true
           grep -n "ksu_handle_sys_reboot" kernel/reboot.c
+          grep -rn "ksu_handle" --include=*.c fs/ drivers/input/ kernel/reboot.c | grep -v "ksu_handle_execveat(&fd\|ksu_handle_sys_reboot\|extern int ksu_handle" || echo "clean"
 
       - name: Configure kernel
         working-directory: kernel
