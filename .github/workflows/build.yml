@@ -66,6 +66,12 @@ jobs:
 
           BLOCK_START = re.compile(r'#(ifdef\s+CONFIG_KSU\s*|if\s+defined\(CONFIG_KSU\)\s*)$')
 
+          def ropen(p):
+              return open(p, encoding='utf-8', errors='surrogateescape')
+
+          def wopen(p):
+              return open(p, 'w', encoding='utf-8', errors='surrogateescape')
+
           def iter_sources():
               for root, dirs, files in os.walk('.'):
                   dirs[:] = [d for d in dirs
@@ -75,7 +81,7 @@ jobs:
                           yield os.path.join(root, fn)
 
           def strip_blocks(path):
-              with open(path) as f:
+              with ropen(path) as f:
                   lines = f.readlines()
               out, i, removed = [], 0, 0
               while i < len(lines):
@@ -96,13 +102,14 @@ jobs:
                   out.append(lines[i])
                   i += 1
               if removed:
-                  with open(path, 'w') as f:
+                  with wopen(path) as f:
                       f.writelines(out)
               return removed
 
           # --- Phase 1: fs/exec.c gate replacement (before tree-wide strip) ---
           p = 'fs/exec.c'
-          lines = open(p).readlines()
+          with ropen(p) as f:
+              lines = f.readlines()
           lines = [l for l in lines if 'extern bool ksu_execveat_hook' not in l]
           out, i, replaced = [], 0, 0
           while i < len(lines):
@@ -119,13 +126,17 @@ jobs:
               out.append(l)
               i += 1
           assert replaced == 1, 'exec.c gate not found'
-          open(p, 'w').writelines(out)
+          with wopen(p) as f:
+              f.writelines(out)
           print('fs/exec.c gate replaced:', replaced)
 
           # --- Phase 2: strip all unsupported #ifdef CONFIG_KSU hooks tree-wide ---
           total, touched = 0, []
           for path in iter_sources():
-              with open(path) as f:
+              with open(path, 'rb') as f:
+                  if b'\x00' in f.read(4096):
+                      continue
+              with ropen(path) as f:
                   src = f.read()
               if 'CONFIG_KSU' not in src:
                   continue
@@ -137,7 +148,8 @@ jobs:
 
           # --- Phase 3: kernel/reboot.c supercall entry (manager channel) ---
           p = 'kernel/reboot.c'
-          src = ''.join(open(p).readlines())
+          with ropen(p) as f:
+              src = f.read()
           anchor = 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'
           assert anchor in src, 'reboot anchor missing'
           ins = ('#ifdef CONFIG_KSU\n'
@@ -151,7 +163,8 @@ jobs:
           k = seg.index(a2) + len(a2)
           call = '\n#ifdef CONFIG_KSU\n        ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif'
           src = src[:idx2 + k] + call + src[idx2 + k:]
-          open(p, 'w').write(src)
+          with wopen(p) as f:
+              f.write(src)
           assert src.count('ksu_handle_sys_reboot') == 2
           print('kernel/reboot.c patched')
 
@@ -161,7 +174,10 @@ jobs:
           for path in iter_sources():
               if path.replace('\\', '/') in allowed:
                   continue
-              with open(path) as f:
+              with open(path, 'rb') as f:
+                  if b'\x00' in f.read(4096):
+                      continue
+              with ropen(path) as f:
                   for ln, line in enumerate(f, 1):
                       if ('ksu_handle' in line or 'ksu_execveat_hook' in line or
                               'ksu_vfs_read_hook' in line or 'ksu_input_hook' in line):
