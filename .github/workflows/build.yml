@@ -31,7 +31,7 @@ jobs:
           ref: ${{ inputs.kernel_ref }}
           path: kernel
 
-      - name: Checkout CI compat assets
+      - name: Checkout CI assets
         uses: actions/checkout@v4
         with:
           ref: backport-4.14.336-A15-etc
@@ -60,18 +60,10 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s dac2d186406a0d2b0ce3c67cad5a1fa1adbf9f4d
           grep -E "^config KSU_MANUAL_HOOK|^config KSU_SUSFS" drivers/kernelsu/Kconfig || true
 
-      - name: Apply susfs compat (v2 dispatch shim + susfs-style hooks)
+      - name: Apply SUSFS v2.3.0 (revert v1.5.5 + JackA1ltman patch + inline hooks)
         working-directory: kernel
         run: |
-          python3 ../ci/susfs_compat/patch_hooks.py
-          cp ../ci/susfs_compat/susfs.c        fs/susfs.c
-          cp ../ci/susfs_compat/susfs.h        include/linux/susfs.h
-          cp ../ci/susfs_compat/susfs_def.h    include/linux/susfs_def.h
-          cp ../ci/susfs_compat/susfs_compat.c fs/susfs_compat.c
-          echo "--- verify ---"
-          grep -n "obj-.*susfs" fs/Makefile
-          grep -n "susfs_compat_init" fs/susfs.c | head -2
-          grep -c "void __user \*\*" include/linux/susfs.h
+          python3 ../ci/susfs_v2/patch_hooks_b.py
 
       - name: Configure kernel
         working-directory: kernel
@@ -90,28 +82,23 @@ jobs:
             -d PINCTRL_MT8183 \
             -d MTK_AEE_IPANIC
 
-          # SUSFS route: KSU_SUSFS hook mode (mutually exclusive with MANUAL_HOOK).
-          # TRY_UMOUNT off: legacy ksu_try_umount() symbol does not exist in
-          # BakaSU; module umounts via its own kernel_umount path.
-          # SUS_MAP off / SUS_SU off: no v1.5.5 backend, shim answers -EOPNOTSUPP.
+          # SUSFS v2.3.0 route: KSU_SUSFS hook mode (mutually exclusive with
+          # MANUAL_HOOK). All nine sub-features ON (SUS_MAP included - the
+          # v2.3.0 kernel side provides the real backend). TRY_UMOUNT does not
+          # exist in BakaSU/ReSukiSU Kconfig at all; module umounts via its own
+          # kernel_umount path. SUS_SU is a GKI-only feature, stays off.
           scripts/config --file out/.config \
             -e KPROBES -e KPROBE_EVENTS \
             -e KSU -e KSU_SUSFS \
             -e KSU_SUSFS_SUS_PATH \
             -e KSU_SUSFS_SUS_MOUNT \
-            -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-            -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
             -e KSU_SUSFS_SUS_KSTAT \
             -e KSU_SUSFS_SPOOF_UNAME \
             -e KSU_SUSFS_ENABLE_LOG \
             -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
             -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
             -e KSU_SUSFS_OPEN_REDIRECT \
-            -d KSU_SUSFS_TRY_UMOUNT \
-            -d KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
-            -d KSU_SUSFS_SUS_MAP \
-            -d KSU_SUSFS_SUS_SU \
-            -d KSU_SUSFS_SUS_OVERLAYFS \
+            -e KSU_SUSFS_SUS_MAP \
             -d KSU_MANUAL_HOOK
           make O=out ARCH=arm64 olddefconfig
 
@@ -120,10 +107,9 @@ jobs:
           grep -q "^CONFIG_KSU=y" out/.config || { echo "FATAL: CONFIG_KSU dropped"; exit 1; }
           grep -q "^CONFIG_KSU_SUSFS=y" out/.config || { echo "FATAL: CONFIG_KSU_SUSFS dropped by olddefconfig"; exit 1; }
           grep -Eq "^# CONFIG_KSU_MANUAL_HOOK is not set|^CONFIG_KSU_MANUAL_HOOK=n" out/.config || { echo "FATAL: CONFIG_KSU_MANUAL_HOOK still enabled"; exit 1; }
-          for opt in SUS_PATH SUS_MOUNT SUS_KSTAT SPOOF_UNAME ENABLE_LOG HIDE_KSU_SUSFS_SYMBOLS SPOOF_CMDLINE_OR_BOOTCONFIG OPEN_REDIRECT; do
+          for opt in SUS_PATH SUS_MOUNT SUS_KSTAT SPOOF_UNAME ENABLE_LOG HIDE_KSU_SUSFS_SYMBOLS SPOOF_CMDLINE_OR_BOOTCONFIG OPEN_REDIRECT SUS_MAP; do
             grep -q "^CONFIG_KSU_SUSFS_${opt}=y" out/.config || { echo "FATAL: CONFIG_KSU_SUSFS_${opt} dropped"; exit 1; }
           done
-          grep -q "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" out/.config && { echo "FATAL: TRY_UMOUNT must be off"; exit 1; } || true
 
       - name: Build kernel Image
         working-directory: kernel
@@ -173,5 +159,5 @@ jobs:
           gh release create "$tag" \
             work/boot-chopin-a13.img \
             work/boot-chopin-a13.img.sha256 \
-            --title "chopin Android 13 kernel + BakaSU + SUSFS ($tag)" \
-            --notes "kernel: ${{ inputs.kernel_ref }} (4.14.186-g0dc1d312efb3) | BakaSU: CI 35236 / commit dac2d18 (SUSFS hook mode) | susfs kernel-side: v1.5.5 + v2 dispatch compat shim | boot base: MIUI V14.0.8.0.TKPCNXM | manager: BakaSU CI 35236"
+            --title "chopin Android 13 kernel + BakaSU + SUSFS v2.3.0 ($tag)" \
+            --notes "kernel: ${{ inputs.kernel_ref }} (4.14.186-g0dc1d312efb3) | BakaSU: CI 35236 / commit dac2d18 (SUSFS hook mode) | susfs kernel-side: v2.3.0 (JackA1ltman 4.14 backport, all 9 features incl. SUS_MAP) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: BakaSU CI 35236"
