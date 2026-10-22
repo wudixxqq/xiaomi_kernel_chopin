@@ -170,7 +170,7 @@ sub_once('fs/exec.c',
          'declare is_su_session')
 
 insert_after('fs/exec.c',
-             '\tretval = bprm_execve(bprm, fd, filename, flags);\n',
+             '\tretval = exec_binprm(bprm);\n',
              '#ifdef CONFIG_KSU\n'
              '\tif (unlikely(is_su_session))\n'
              '\t\t(void)ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n'
@@ -227,8 +227,6 @@ sub_once('fs/stat.c',
          '#include <linux/susfs_def.h>\n'
          'extern struct static_key_true ksu_su_compat_enabled;\n'
          'extern bool __ksu_is_allow_uid_for_current(uid_t uid);\n'
-         'extern struct static_key_true ksu_is_init_rc_hook_enabled;\n'
-         'extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\n'
          'extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);\n'
          '#endif\n',
          'stat externs -> susfs style')
@@ -260,14 +258,9 @@ sub_once('fs/stat.c',
          '#endif',
          'statx lookup -> filename_lookup')
 
-insert_after('fs/stat.c',
-             '\t\terror = vfs_getattr(&f.file->f_path, stat,\n'
-             '\t\t\t\t\t    STATX_BASIC_STATS, 0);\n',
-             '#ifdef CONFIG_KSU\n'
-             '\t\tif (static_branch_unlikely(&ksu_is_init_rc_hook_enabled))\n'
-             '\t\t\tksu_handle_vfs_fstat(fd, &stat->size);\n'
-             '#endif\n',
-             'vfs_fstat hook')
+# NOTE: no vfs_fstat hook on 4.14 - this tree does not define vfs_fstat() in
+# fs/stat.c, the module does not require it (inline_hook_check.mk does not
+# check it), and ksu_handle_sys_read() already covers init.rc detection.
 
 # ---------------------------------------------------------------------------
 # 5. fs/read_write.c
@@ -367,8 +360,7 @@ required = {
                   'ksu_su_compat_enabled', 'susfs_is_current_proc_no_su'],
     'fs/open.c': ['ksu_handle_faccessat(&dfd', 'filename_lookup(dfd, fname',
                   '__ksu_is_allow_uid_for_current'],
-    'fs/stat.c': ['ksu_handle_stat(&dfd', 'ksu_handle_vfs_fstat(fd',
-                  'filename_lookup(dfd, fname'],
+    'fs/stat.c': ['ksu_handle_stat(&dfd', 'filename_lookup(dfd, fname'],
     'fs/read_write.c': ['ksu_handle_sys_read(fd', 'ksu_is_init_rc_hook_enabled'],
     'kernel/sys.c': ['ksu_handle_setresuid(ruid'],
     'kernel/reboot.c': ['ksu_handle_sys_reboot(magic1', 'orig_flow'],
