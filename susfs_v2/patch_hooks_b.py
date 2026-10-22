@@ -329,6 +329,11 @@ for p in ('fs/susfs.c', 'include/linux/susfs.h', 'include/linux/susfs_def.h'):
         out('-- SKIP (missing, simulation): %s' % p)
     else:
         fatal('%s missing (expected in-tree v1.5.5 file)' % p)
+# v1.5.5 SUS_SU helper - unreferenced dead file in the chopin tree (no
+# fs/Makefile entry); v2.3.0 has no SUS_SU backend, drop it.
+if os.path.exists('fs/sus_su.c'):
+    os.remove('fs/sus_su.c')
+    out('OK  removed fs/sus_su.c (dead SUS_SU helper)')
 
 
 def clean_fdinfo(s):
