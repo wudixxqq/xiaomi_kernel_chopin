@@ -61,16 +61,17 @@ jobs:
           grep -E "^config KSU_MANUAL_HOOK|^config KSU_SUSFS" drivers/kernelsu/Kconfig || true
 
       - name: Apply susfs compat (v2 dispatch shim + susfs-style hooks)
+        working-directory: kernel
         run: |
-          python3 ci/susfs_compat/patch_hooks.py
-          cp ci/susfs_compat/susfs.c        kernel/fs/susfs.c
-          cp ci/susfs_compat/susfs.h        kernel/include/linux/susfs.h
-          cp ci/susfs_compat/susfs_def.h    kernel/include/linux/susfs_def.h
-          cp ci/susfs_compat/susfs_compat.c kernel/fs/susfs_compat.c
+          python3 ../ci/susfs_compat/patch_hooks.py
+          cp ../ci/susfs_compat/susfs.c        fs/susfs.c
+          cp ../ci/susfs_compat/susfs.h        include/linux/susfs.h
+          cp ../ci/susfs_compat/susfs_def.h    include/linux/susfs_def.h
+          cp ../ci/susfs_compat/susfs_compat.c fs/susfs_compat.c
           echo "--- verify ---"
-          grep -n "obj-.*susfs" kernel/fs/Makefile
-          grep -n "susfs_compat_init" kernel/fs/susfs.c | head -2
-          grep -c "void __user \*\*" kernel/include/linux/susfs.h
+          grep -n "obj-.*susfs" fs/Makefile
+          grep -n "susfs_compat_init" fs/susfs.c | head -2
+          grep -c "void __user \*\*" include/linux/susfs.h
 
       - name: Configure kernel
         working-directory: kernel
