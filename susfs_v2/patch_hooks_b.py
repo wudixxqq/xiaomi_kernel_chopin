@@ -681,7 +681,9 @@ FDINFO_INS = (
     '\t\t\t\tkfree(pathname);\n'
     '\t\t\t}\n'
     '\t\t}\n'
+    '\t}\n'
     'orig_flow:\n'
+    '\t;\n'
     '#endif\n')
 if need('fs/notify/fdinfo.c'):
     with ropen('fs/notify/fdinfo.c') as f:
