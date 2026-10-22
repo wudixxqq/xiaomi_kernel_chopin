@@ -276,14 +276,50 @@ out('OK  susfs update gate verified removed everywhere')
 
 # ===========================================================================
 next_step('revert in-tree susfs v1.5.5 (official kernel-4.14 patch, -R)')
-# fdinfo.c / kernel/sys.c reverted manually in step [2] (miui-tree context
-# differences make the stock hunks fail there).
+# fdinfo.c / kernel/sys.c / task_mmu.c / readdir.c reverted manually in step
+# [4]: miui-tree context differences make some stock hunks fail there.
 run_patch_sections(os.path.join(ASSET_DIR, 'susfs_v155_414_official.patch'),
                    '-R',
-                   excludes=('fs/notify/fdinfo.c', 'kernel/sys.c'))
+                   excludes=('fs/notify/fdinfo.c', 'kernel/sys.c',
+                             'fs/proc/task_mmu.c', 'fs/readdir.c'))
 
 # ===========================================================================
-next_step('delete old susfs files; clean fdinfo.c / kernel/sys.c leftovers')
+next_step('delete old susfs files; clean fdinfo/sys/task_mmu/readdir leftovers')
+
+
+def remove_all_susfs_blocks(path):
+    """generic cleanup: remove every #ifdef CONFIG_KSU_SUSFS* ... #endif block
+    (nesting-aware) plus susfs include lines. Used for files where the stock
+    v1.5.5 revert hunks failed (task_mmu.c / readdir.c leftovers)."""
+    with ropen(path) as f:
+        lines = f.readlines()
+    blk = re.compile(r'#\s*ifdef\s+CONFIG_KSU_SUSFS')
+    out_l, i, removed = [], 0, 0
+    while i < len(lines):
+        if blk.match(lines[i].strip()):
+            j, depth = i, 1
+            while j + 1 < len(lines) and depth:
+                j += 1
+                s = lines[j].strip()
+                if s.startswith('#if'):
+                    depth += 1
+                elif s.startswith('#endif'):
+                    depth -= 1
+            removed += 1
+            i = j + 1
+            continue
+        out_l.append(lines[i])
+        i += 1
+    txt = ''.join(out_l)
+    txt2 = re.sub(r'#include <linux/susfs(_def)?\.h>\r?\n', '', txt)
+    if txt2 != txt:
+        removed += 1
+    if 'susfs' in txt2 or 'SUSFS' in txt2:
+        fatal('%s: susfs trace remains after generic cleanup' % path)
+    with wopen(path) as f:
+        f.write(txt2)
+    out('OK  %s: generic susfs cleanup (%d block(s)/line(s) removed)' % (path, removed))
+
 
 for p in ('fs/susfs.c', 'include/linux/susfs.h', 'include/linux/susfs_def.h'):
     if os.path.exists(p):
@@ -390,6 +426,14 @@ if need('kernel/sys.c'):
         with wopen('kernel/sys.c') as f:
             f.write(s2)
         out('OK  kernel/sys.c: cleaned')
+for p in ('fs/proc/task_mmu.c', 'fs/readdir.c'):
+    if need(p):
+        with ropen(p) as f:
+            t = f.read()
+        if 'susfs' in t or 'SUSFS' in t:
+            remove_all_susfs_blocks(p)
+        else:
+            out('-- %s already clean' % p)
 
 # ===========================================================================
 next_step('residue assertion (no susfs trace outside susfs files)')
@@ -482,7 +526,10 @@ if re.search(r'(?m)^\+\+[^+]', jtext.split('diff --git', 1)[1] if 'diff --git' i
 if re.search(r'(?m)^diff --git .*/\.git/', jtext):
     fatal('Jack patch contains .git/ sections (upstream pollution)')
 run_patch_sections(jack_patch, '',
-                   excludes=('fs/notify/fdinfo.c', 'kernel/sys.c'))
+                   excludes=('fs/notify/fdinfo.c', 'kernel/sys.c'),
+                   # task_mmu hunks 1/5/6 reject exactly like on rosemary
+                   # (include + cosmetics); fix_susfs_task_mmu.py repairs them.
+                   expect_fail=(('fs/proc/task_mmu.c', '3 out of 8 hunks FAILED'),))
 
 for p in ('fs/susfs.c', 'include/linux/susfs.h', 'include/linux/susfs_def.h'):
     if not os.path.exists(p):
@@ -688,6 +735,19 @@ for fx in ('fix_susfs_task_mmu.py', 'fix_susfs_414.py'):
     out((r.stdout or '') + (r.stderr or ''))
     if r.returncode != 0:
         fatal('%s exited %d' % (fx, r.returncode))
+# fixer repaired the include + guard; drop the tolerated reject files
+for rej in ('fs/proc/task_mmu.c.rej', 'patch_rejects/fs/proc/task_mmu.c.rej'):
+    if os.path.exists(rej):
+        os.remove(rej)
+        out('OK  removed tolerated reject %s' % rej)
+if need('fs/proc/task_mmu.c'):
+    with ropen('fs/proc/task_mmu.c') as f:
+        tm = f.read()
+    if 'susfs_def.h' not in tm:
+        fatal('task_mmu.c: susfs_def.h include missing after fixer')
+    if 'SUSFS_IS_INODE_SUS_MAP' not in tm:
+        fatal('task_mmu.c: SUS_MAP guard missing after fixer')
+    out('OK  task_mmu.c: include + SUS_MAP guard verified')
 
 # ===========================================================================
 next_step('final verification')
