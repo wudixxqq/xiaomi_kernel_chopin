@@ -138,7 +138,7 @@ else:
 # 2. fs/exec.c
 # ---------------------------------------------------------------------------
 sub_once('fs/exec.c',
-         r'#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat\(int \*fd, struct filename \*\*filename_ptr, void \*argv,\n\t\t\tvoid \*envp, int \*flags\);\nextern int ksu_handle_execveat_sucompat\(int \*fd, struct filename \*\*filename_ptr,\n\t\t\t void \*argv, void \*envp, int \*flags\);\n#endif\n',
+         r'#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat\(int \*fd, struct filename \*\*filename_ptr, void \*argv,\n[\t ]*void \*envp, int \*flags\);\nextern int ksu_handle_execveat_sucompat\(int \*fd, struct filename \*\*filename_ptr,\n[\t ]*void \*argv, void \*envp, int \*flags\);\n#endif\n',
          '#ifdef CONFIG_KSU\n'
          '#include <linux/susfs_def.h>\n'
          'extern struct static_key_true ksu_su_compat_enabled;\n'
@@ -181,7 +181,7 @@ insert_after('fs/exec.c',
 # 3. fs/open.c
 # ---------------------------------------------------------------------------
 sub_once('fs/open.c',
-         r'#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat\(int \*dfd, const char __user \*\*filename_user, int \*mode,\n\t\t\t int \*flags\);\n#endif\n',
+         r'#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat\(int \*dfd, const char __user \*\*filename_user, int \*mode,\n[\t ]*int \*flags\);\n#endif\n',
          '#ifdef CONFIG_KSU\n'
          '#include <linux/susfs_def.h>\n'
          'extern struct static_key_true ksu_su_compat_enabled;\n'
