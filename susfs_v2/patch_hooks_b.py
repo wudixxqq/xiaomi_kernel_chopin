@@ -681,7 +681,6 @@ FDINFO_INS = (
     '\t\t\t\tkfree(pathname);\n'
     '\t\t\t}\n'
     '\t\t}\n'
-    '\t}\n'
     'orig_flow:\n'
     '\t;\n'
     '#endif\n')
@@ -693,8 +692,15 @@ if need('fs/notify/fdinfo.c'):
     else:
         insert_after('fs/notify/fdinfo.c', FDINFO_ANCHOR, FDINFO_INS,
                      'inotify_fdinfo SUS_KSTAT/SUS_MOUNT blocks')
+        # brace sanity: the inserted block must not unbalance the function
+        ins_bal = FDINFO_INS.count('{') - FDINFO_INS.count('}')
+        if ins_bal != 0:
+            fatal('fdinfo.c: inserted block itself unbalanced (%+d)' % ins_bal)
         with ropen('fs/notify/fdinfo.c') as f:
             fd2 = f.read()
+        bal = fd2.count('{') - fd2.count('}')
+        if bal != 0:
+            fatal('fdinfo.c: file unbalanced after port (%+d braces)' % bal)
         for marker in ('susfs_is_current_app_uid', 'susfs_is_current_proc_umounted',
                        'orig_flow:', 'susfs_def.h',
                        'static void inotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark, struct file *file)'):
