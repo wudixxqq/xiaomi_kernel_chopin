@@ -80,7 +80,7 @@ jobs:
           # --- Phase 0: decouple the hook-method choice in kernelsu Kconfig ---
           # choice { TRACEPOINT / MANUAL / SUSFS } is mutually exclusive and
           # defconfig already picks KSU_SUSFS, which silently drops KSU_MANUAL_HOOK.
-          # Convert the choice into three independent bools so MANUAL + SUSFS coexist.
+          # Convert the choice into three independent bools.
           p = 'drivers/kernelsu/Kconfig'
           with ropen(p) as f:
               lines = f.readlines()
@@ -228,6 +228,7 @@ jobs:
           # --- Phase 4b: fs/notify/fdinfo.c susfs merge fix ---
           # susfs patch leaves `out_seq_printf:` label directly before a variable
           # declaration, which is illegal before C23 and breaks 4.14 builds.
+          # Applied unconditionally; harmless when susfs is compiled out.
           p = 'fs/notify/fdinfo.c'
           with ropen(p) as f:
               lines = f.readlines()
@@ -287,25 +288,28 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             chopin_defconfig
 
-          scripts/config --file out/.config --set-str LOCALVERSION "-chopin-a13"
+          # stock MIUI kernel version string: 4.14.186-g0dc1d312efb3
+          scripts/config --file out/.config --set-str LOCALVERSION "-g0dc1d312efb3"
           scripts/config --file out/.config -d DEBUG_INFO
           scripts/config --file out/.config \
             -d COMMON_CLK_MT8168 \
             -d COMMON_CLK_MT8183 \
             -d PINCTRL_MT8183 \
             -d MTK_AEE_IPANIC
-          # ReSukiSU CI 35236: manual hook + LSM auto setuid/initrc + SUSFS features
-          # (hook-method choice was decoupled in the patch step, MANUAL + SUSFS coexist)
+          # ReSukiSU CI 35236: manual hook + LSM auto setuid/initrc.
+          # KSU_SUSFS disabled: the kernel's susfs integration is the legacy
+          # direct-call API (no CMD_*/susfs_cmd dispatcher) and is incompatible
+          # with ReSukiSU's susfs command dispatch; enabling it breaks the build.
           scripts/config --file out/.config \
             -e KPROBES -e KPROBE_EVENTS \
             -e KSU -e KSU_MANUAL_HOOK \
             -e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
             -e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
-            -e KSU_SUSFS
+            -d KSU_SUSFS
           make O=out ARCH=arm64 olddefconfig
-          grep -E "^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|KPROBES|OVERLAY_FS|EXT4_FS)" out/.config || true
+          grep -E "^CONFIG_(KSU|KSU_MANUAL_HOOK|KPROBES|OVERLAY_FS|EXT4_FS)" out/.config || true
           grep -q "^CONFIG_KSU_MANUAL_HOOK=y" out/.config || { echo "FATAL: CONFIG_KSU_MANUAL_HOOK dropped by olddefconfig"; exit 1; }
-          grep -q "^CONFIG_KSU_SUSFS=y" out/.config || { echo "FATAL: CONFIG_KSU_SUSFS dropped by olddefconfig"; exit 1; }
+          grep -Eq "^# CONFIG_KSU_SUSFS is not set|^CONFIG_KSU_SUSFS=n" out/.config || { echo "FATAL: CONFIG_KSU_SUSFS not disabled"; exit 1; }
 
       - name: Build kernel Image
         working-directory: kernel
@@ -356,4 +360,4 @@ jobs:
             work/boot-chopin-a13.img \
             work/boot-chopin-a13.img.sha256 \
             --title "chopin Android 13 kernel + ReSukiSU ($tag)" \
-            --notes "kernel: ${{ inputs.kernel_ref }} | ReSukiSU: CI 35236 / commit dac2d18 (manual hook, SUSFS) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: ReSukiSU CI 35236"
+            --notes "kernel: ${{ inputs.kernel_ref }} (4.14.186-g0dc1d312efb3) | ReSukiSU: CI 35236 / commit dac2d18 (manual hook) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: ReSukiSU CI 35236"
