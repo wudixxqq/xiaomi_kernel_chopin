@@ -337,8 +337,16 @@ sub_once('drivers/input/input.c',
          'input hook -> static key')
 
 # ---------------------------------------------------------------------------
-# 9. fs/notify/fdinfo.c: align fanotify_fdinfo with the 3-param show_fdinfo
+# 9. fs/notify/fdinfo.c
 # ---------------------------------------------------------------------------
+# 9a. susfs patch leaves `out_seq_printf:` label directly before a variable
+#     declaration, which is illegal C before C23 - insert an empty statement.
+sub_once('fs/notify/fdinfo.c',
+         r'out_seq_printf:\n#endif',
+         'out_seq_printf:\n\t;\n#endif',
+         'fdinfo out_seq_printf label fix')
+
+# 9b. align fanotify_fdinfo with the 3-param show_fdinfo
 sub_once('fs/notify/fdinfo.c',
          r'static void fanotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)\n\{\n',
          'static void fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark, struct file *file)\n{\n\t(void)file;\n',
