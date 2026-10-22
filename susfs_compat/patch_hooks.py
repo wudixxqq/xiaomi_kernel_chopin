@@ -304,7 +304,7 @@ if 'ksu_handle_sys_reboot' not in rb:
     idx2 = rb.index('SYSCALL_DEFINE4(reboot')
     a2 = 'int ret = 0;'
     k = rb.index(a2, idx2) + len(a2)
-    ls = rb.rfind('\n', 0, k) + 1
+    ls = rb.find('\n', k) + 1  # insert AFTER the "int ret = 0;" line
     rb = rb[:ls] + ('#ifdef CONFIG_KSU\n'
                     '\tret = ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n'
                     '\tif (ret) {\n'
