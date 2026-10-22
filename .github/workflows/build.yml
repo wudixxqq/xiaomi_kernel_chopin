@@ -47,7 +47,7 @@ jobs:
             build-essential flex bison libssl-dev libelf-dev \
             bc cpio rsync zip unzip ccache python3
 
-      - name: Setup ReSukiSU (BakaSU) v4.2.0-rc3 manual hook
+      - name: Setup ReSukiSU CI 35236 (commit dac2d18)
         working-directory: kernel
         run: |
           rm -rf drivers/kernelsu
@@ -76,6 +76,39 @@ jobs:
                   for fn in files:
                       if fn.endswith(('.c', '.h')):
                           yield os.path.join(root, fn)
+
+          # --- Phase 0: decouple the hook-method choice in kernelsu Kconfig ---
+          # choice { TRACEPOINT / MANUAL / SUSFS } is mutually exclusive and
+          # defconfig already picks KSU_SUSFS, which silently drops KSU_MANUAL_HOOK.
+          # Convert the choice into three independent bools so MANUAL + SUSFS coexist.
+          p = 'drivers/kernelsu/Kconfig'
+          with ropen(p) as f:
+              lines = f.readlines()
+          out, i, n = [], 0, len(lines)
+          decoupled = 0
+          while i < n:
+              if lines[i].strip() == 'choice' and i + 1 < n and 'KernelSU Hooking Method' in lines[i + 1]:
+                  j = i
+                  while j < n and lines[j].strip() != 'endchoice':
+                      j += 1
+                  assert j < n, 'endchoice not found'
+                  k = i
+                  while k < j and not lines[k].strip().startswith('config '):
+                      k += 1
+                  assert k < j, 'no config inside choice'
+                  out.extend(lines[k:j])
+                  decoupled += 1
+                  i = j + 1
+                  continue
+              out.append(lines[i])
+              i += 1
+          assert decoupled == 1, 'hook-method choice not found'
+          with wopen(p) as f:
+              f.writelines(out)
+          txt = ''.join(out)
+          assert 'config KSU_MANUAL_HOOK' in txt and 'config KSU_SUSFS' in txt
+          assert not re.search(r'(?m)^\s*choice\s*$', txt)
+          print('kernelsu/Kconfig hook choice decoupled')
 
           # --- Phase 1: fs/exec.c gate -> single ksu_handle_execveat() call ---
           p = 'fs/exec.c'
@@ -192,6 +225,25 @@ jobs:
           assert src.count('ksu_handle_fstat64_ret') == 2
           print('fs/stat.c ret hooks added')
 
+          # --- Phase 4b: fs/notify/fdinfo.c susfs merge fix ---
+          # susfs patch leaves `out_seq_printf:` label directly before a variable
+          # declaration, which is illegal before C23 and breaks 4.14 builds.
+          p = 'fs/notify/fdinfo.c'
+          with ropen(p) as f:
+              lines = f.readlines()
+          out, fixed = [], 0
+          for idx, l in enumerate(lines):
+              out.append(l)
+              if l.strip() == 'out_seq_printf:' and fixed == 0:
+                  nxt = lines[idx + 1].strip() if idx + 1 < len(lines) else ''
+                  if nxt != ';':
+                      out.append('\t;\n')
+                  fixed += 1
+          assert fixed == 1, 'fdinfo out_seq_printf label not found'
+          with wopen(p) as f:
+              f.writelines(out)
+          print('fs/notify/fdinfo.c label fix applied')
+
           # --- Phase 5: verify required hooks present, forbidden absent ---
           required = {
               'fs/exec.c': ['ksu_handle_execveat(&fd'],
@@ -199,12 +251,13 @@ jobs:
               'fs/stat.c': ['ksu_handle_stat(&dfd', 'ksu_handle_newfstat_ret(&fd', 'ksu_handle_fstat64_ret(&fd'],
               'drivers/input/input.c': ['ksu_handle_input_handle_event(&type'],
               'kernel/reboot.c': ['ksu_handle_sys_reboot(magic1'],
+              'fs/notify/fdinfo.c': ['out_seq_printf:'],
           }
           for path, needles in required.items():
               with ropen(path) as f:
                   src = f.read()
-              for n in needles:
-                  assert n in src, '%s missing %s' % (path, n)
+              for nd in needles:
+                  assert nd in src, '%s missing %s' % (path, nd)
               print('OK', path)
           bad = []
           for path in iter_sources():
@@ -241,7 +294,8 @@ jobs:
             -d COMMON_CLK_MT8183 \
             -d PINCTRL_MT8183 \
             -d MTK_AEE_IPANIC
-          # ReSukiSU v4.2.0-rc3: manual hook + LSM auto setuid/initrc + SUSFS
+          # ReSukiSU CI 35236: manual hook + LSM auto setuid/initrc + SUSFS features
+          # (hook-method choice was decoupled in the patch step, MANUAL + SUSFS coexist)
           scripts/config --file out/.config \
             -e KPROBES -e KPROBE_EVENTS \
             -e KSU -e KSU_MANUAL_HOOK \
@@ -250,6 +304,8 @@ jobs:
             -e KSU_SUSFS
           make O=out ARCH=arm64 olddefconfig
           grep -E "^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|KPROBES|OVERLAY_FS|EXT4_FS)" out/.config || true
+          grep -q "^CONFIG_KSU_MANUAL_HOOK=y" out/.config || { echo "FATAL: CONFIG_KSU_MANUAL_HOOK dropped by olddefconfig"; exit 1; }
+          grep -q "^CONFIG_KSU_SUSFS=y" out/.config || { echo "FATAL: CONFIG_KSU_SUSFS dropped by olddefconfig"; exit 1; }
 
       - name: Build kernel Image
         working-directory: kernel
