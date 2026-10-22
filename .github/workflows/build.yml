@@ -47,23 +47,20 @@ jobs:
             build-essential flex bison libssl-dev libelf-dev \
             bc cpio rsync zip unzip ccache python3
 
-      - name: Setup KernelSU-Next v3.4.0-legacy (manual hook build for 4.14)
+      - name: Setup ReSukiSU (BakaSU) v4.2.0-rc3 manual hook
         working-directory: kernel
         run: |
           rm -rf drivers/kernelsu
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s v3.4.0-legacy
-          grep -E "config KSU|config KSU_MANUAL_HOOK" drivers/kernelsu/Kconfig || true
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s v4.2.0-rc3
+          grep -E "^config KSU_MANUAL_HOOK|^config KSU_SUSFS" drivers/kernelsu/Kconfig || true
 
-      - name: Adapt kernel manual hooks for KSU-Next v3.x
+      - name: Adapt kernel manual hooks for ReSukiSU
         working-directory: kernel
         run: |
           python3 - <<'EOF'
           import os, re, sys
 
-          DISALLOW = ['ksu_vfs_read_hook', 'ksu_input_hook', 'ksu_execveat_hook',
-                      'ksu_handle_vfs_read', 'ksu_handle_input_handle_event',
-                      'ksu_handle_devpts', 'ksu_handle_faccessat', 'ksu_handle_stat']
-
+          FORBIDDEN = ['ksu_vfs_read_hook', 'ksu_execveat_hook', 'ksu_handle_vfs_read']
           BLOCK_START = re.compile(r'#(ifdef\s+CONFIG_KSU\s*|if\s+defined\(CONFIG_KSU\)\s*)$')
 
           def ropen(p):
@@ -75,38 +72,12 @@ jobs:
           def iter_sources():
               for root, dirs, files in os.walk('.'):
                   dirs[:] = [d for d in dirs
-                             if d not in ('out', '.git', 'KernelSU-Next')]
+                             if d not in ('out', '.git', 'KernelSU')]
                   for fn in files:
                       if fn.endswith(('.c', '.h')):
                           yield os.path.join(root, fn)
 
-          def strip_blocks(path):
-              with ropen(path) as f:
-                  lines = f.readlines()
-              out, i, removed = [], 0, 0
-              while i < len(lines):
-                  if BLOCK_START.match(lines[i].strip()):
-                      j, depth = i, 1
-                      while j + 1 < len(lines) and depth:
-                          j += 1
-                          s = lines[j].strip()
-                          if s.startswith('#if'):
-                              depth += 1
-                          elif s == '#endif':
-                              depth -= 1
-                      text = ''.join(lines[i:j+1])
-                      if any(m in text for m in DISALLOW):
-                          removed += 1
-                          i = j + 1
-                          continue
-                  out.append(lines[i])
-                  i += 1
-              if removed:
-                  with wopen(path) as f:
-                      f.writelines(out)
-              return removed
-
-          # --- Phase 1: fs/exec.c gate replacement (before tree-wide strip) ---
+          # --- Phase 1: fs/exec.c gate -> single ksu_handle_execveat() call ---
           p = 'fs/exec.c'
           with ropen(p) as f:
               lines = f.readlines()
@@ -130,29 +101,48 @@ jobs:
               f.writelines(out)
           print('fs/exec.c gate replaced:', replaced)
 
-          # --- Phase 2: strip all unsupported #ifdef CONFIG_KSU hooks tree-wide ---
-          total, touched = 0, []
+          # --- Phase 2: strip only the forbidden vfs_read hook (read_write.c) ---
+          removed_total = 0
           for path in iter_sources():
               with open(path, 'rb') as f:
                   if b'\x00' in f.read(4096):
                       continue
               with ropen(path) as f:
-                  src = f.read()
-              if 'CONFIG_KSU' not in src:
+                  lines = f.readlines()
+              src_all = ''.join(lines)
+              if 'ksu_vfs_read_hook' not in src_all:
                   continue
-              n = strip_blocks(path)
-              if n:
-                  total += n
-                  touched.append('%s(%d)' % (path, n))
-          print('stripped blocks:', total, touched)
+              out, i, removed = [], 0, 0
+              while i < len(lines):
+                  if BLOCK_START.match(lines[i].strip()):
+                      j, depth = i, 1
+                      while j + 1 < len(lines) and depth:
+                          j += 1
+                          s = lines[j].strip()
+                          if s.startswith('#if'):
+                              depth += 1
+                          elif s == '#endif':
+                              depth -= 1
+                      text = ''.join(lines[i:j+1])
+                      if any(m in text for m in FORBIDDEN):
+                          removed += 1
+                          i = j + 1
+                          continue
+                  out.append(lines[i])
+                  i += 1
+              with wopen(path) as f:
+                  f.writelines(out)
+              removed_total += removed
+              print('stripped', path, removed)
+          print('total stripped:', removed_total)
 
-          # --- Phase 3: kernel/reboot.c supercall entry (manager channel) ---
+          # --- Phase 3: kernel/reboot.c supercall entry ---
           p = 'kernel/reboot.c'
           with ropen(p) as f:
               src = f.read()
           anchor = 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'
           assert anchor in src, 'reboot anchor missing'
-          ins = ('#ifdef CONFIG_KSU\n'
+          ins = ('#ifdef CONFIG_KSU_MANUAL_HOOK\n'
                  'extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n'
                  '#endif\n')
           idx = src.index(anchor)
@@ -161,29 +151,72 @@ jobs:
           seg = src[idx2:]
           a2 = 'int ret = 0;'
           k = seg.index(a2) + len(a2)
-          call = '\n#ifdef CONFIG_KSU\n        ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif'
-          src = src[:idx2 + k] + call + src[idx2 + k:]
+          ls = src.rfind('\n', 0, idx2 + k) + 1
+          call = '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n'
+          src = src[:ls] + call + src[ls:]
           with wopen(p) as f:
               f.write(src)
           assert src.count('ksu_handle_sys_reboot') == 2
           print('kernel/reboot.c patched')
 
-          # --- Phase 4: full-tree verification, fail fast on leftovers ---
-          allowed = ('./fs/exec.c', './kernel/reboot.c')
+          # --- Phase 4: fs/stat.c add newfstat_ret + fstat64_ret hooks ---
+          p = 'fs/stat.c'
+          with ropen(p) as f:
+              src = f.read()
+
+          ext1 = ('#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+                  'extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n'
+                  '#endif\n')
+          a1 = 'SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)'
+          assert a1 in src, 'newfstat anchor missing'
+          src = src[:src.index(a1)] + ext1 + src[src.index(a1):]
+          idx = src.index(a1)
+          k = src.index('return error;', idx)
+          ls = src.rfind('\n', 0, k) + 1
+          src = src[:ls] + '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n' + src[ls:]
+
+          ext2 = ('#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+                  'extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n'
+                  '#endif\n')
+          a2s = 'SYSCALL_DEFINE2(fstat64, unsigned long, fd'
+          assert a2s in src, 'fstat64 anchor missing'
+          src = src[:src.index(a2s)] + ext2 + src[src.index(a2s):]
+          idx = src.index(a2s)
+          k = src.index('return error;', idx)
+          ls = src.rfind('\n', 0, k) + 1
+          src = src[:ls] + '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n' + src[ls:]
+
+          with wopen(p) as f:
+              f.write(src)
+          assert src.count('ksu_handle_newfstat_ret') == 2
+          assert src.count('ksu_handle_fstat64_ret') == 2
+          print('fs/stat.c ret hooks added')
+
+          # --- Phase 5: verify required hooks present, forbidden absent ---
+          required = {
+              'fs/exec.c': ['ksu_handle_execveat(&fd'],
+              'fs/open.c': ['ksu_handle_faccessat(&dfd'],
+              'fs/stat.c': ['ksu_handle_stat(&dfd', 'ksu_handle_newfstat_ret(&fd', 'ksu_handle_fstat64_ret(&fd'],
+              'drivers/input/input.c': ['ksu_handle_input_handle_event(&type'],
+              'kernel/reboot.c': ['ksu_handle_sys_reboot(magic1'],
+          }
+          for path, needles in required.items():
+              with ropen(path) as f:
+                  src = f.read()
+              for n in needles:
+                  assert n in src, '%s missing %s' % (path, n)
+              print('OK', path)
           bad = []
           for path in iter_sources():
-              if path.replace('\\', '/') in allowed:
-                  continue
               with open(path, 'rb') as f:
                   if b'\x00' in f.read(4096):
                       continue
               with ropen(path) as f:
                   for ln, line in enumerate(f, 1):
-                      if ('ksu_handle' in line or 'ksu_execveat_hook' in line or
-                              'ksu_vfs_read_hook' in line or 'ksu_input_hook' in line):
+                      if any(m in line for m in FORBIDDEN):
                           bad.append('%s:%d: %s' % (path, ln, line.strip()))
           if bad:
-              print('LEFTOVER KSU HOOKS:')
+              print('FORBIDDEN SYMBOLS LEFT:')
               print('\n'.join(bad))
               sys.exit(1)
           print('VERIFICATION CLEAN')
@@ -191,7 +224,7 @@ jobs:
           echo "--- verify ---"
           grep -n "ksu_handle_execveat(&fd" fs/exec.c
           grep -n "ksu_handle_sys_reboot" kernel/reboot.c
-          grep -rn "ksu_handle" --include=*.c fs/ drivers/input/ kernel/reboot.c | grep -v "ksu_handle_execveat(&fd\|ksu_handle_sys_reboot\|extern int ksu_handle" || echo "clean"
+          grep -c "ksu_handle" fs/stat.c fs/open.c drivers/input/input.c fs/inode.c
 
       - name: Configure kernel
         working-directory: kernel
@@ -208,10 +241,15 @@ jobs:
             -d COMMON_CLK_MT8183 \
             -d PINCTRL_MT8183 \
             -d MTK_AEE_IPANIC
-          # KSU-Next v3.4.0-legacy: manual hook mode (kprobe hook path needs >=5.10)
-          scripts/config --file out/.config -e KPROBES -e KPROBE_EVENTS -e KSU -e KSU_MANUAL_HOOK
+          # ReSukiSU v4.2.0-rc3: manual hook + LSM auto setuid/initrc + SUSFS
+          scripts/config --file out/.config \
+            -e KPROBES -e KPROBE_EVENTS \
+            -e KSU -e KSU_MANUAL_HOOK \
+            -e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
+            -e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
+            -e KSU_SUSFS
           make O=out ARCH=arm64 olddefconfig
-          grep -E "^CONFIG_(KSU|KSU_MANUAL_HOOK|KPROBES|OVERLAY_FS|EXT4_FS)" out/.config || true
+          grep -E "^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|KPROBES|OVERLAY_FS|EXT4_FS)" out/.config || true
 
       - name: Build kernel Image
         working-directory: kernel
@@ -261,5 +299,5 @@ jobs:
           gh release create "$tag" \
             work/boot-chopin-a13.img \
             work/boot-chopin-a13.img.sha256 \
-            --title "chopin Android 13 kernel + KernelSU-Next ($tag)" \
-            --notes "kernel: ${{ inputs.kernel_ref }} | KSU-Next: v3.4.0-legacy (manual hook) | boot base: MIUI V14.0.8.0.TKPCNXM"
+            --title "chopin Android 13 kernel + ReSukiSU ($tag)" \
+            --notes "kernel: ${{ inputs.kernel_ref }} | ReSukiSU: v4.2.0-rc3 (manual hook, SUSFS) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: ReSukiSU_v4.2.0-rc3"
