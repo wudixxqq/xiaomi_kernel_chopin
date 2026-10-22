@@ -112,21 +112,44 @@ with wopen(p) as f:
 print('OK  drivers/kernelsu/Kconfig: choice decoupled, THREAD_INFO_IN_TASK dep removed')
 
 # ---------------------------------------------------------------------------
-# 0b. drivers/kernelsu/tools/susfs_compat.mk: BakaSU gates SUSFS-mode builds
-#     with an unconditional $(error) until simonpunk publishes the matching
-#     kernel-side. Our compat shim IS that kernel-side - remove the gate.
-#     (soft: if a future module commit drops the gate, keep going)
+# 0b. BakaSU gates SUSFS-mode builds with an unconditional $(error) until
+#     simonpunk publishes the matching kernel-side. Our compat shim IS that
+#     kernel-side - remove the gate. Patch EVERY physical copy (the module
+#     lives at KernelSU/kernel; drivers/kernelsu is a symlink to it) and
+#     verify by re-reading both paths.
 # ---------------------------------------------------------------------------
-p = 'drivers/kernelsu/tools/susfs_compat.mk'
-with ropen(p) as f:
-    mk = f.read()
-if '$(error Please wait susfs update' in mk:
-    mk = re.sub(r'(?m)^\s*\$\(error Please wait susfs update[^\n]*\n', '', mk)
-    with wopen(p) as f:
-        f.write(mk)
-    print('OK  drivers/kernelsu/tools/susfs_compat.mk: susfs update gate removed')
-else:
-    print('OK  drivers/kernelsu/tools/susfs_compat.mk: no update gate present')
+gate = '$(error Please wait susfs update'
+cands = ['drivers/kernelsu/tools/susfs_compat.mk',
+         'KernelSU/kernel/tools/susfs_compat.mk']
+patched_any = False
+for p in cands:
+    if not os.path.exists(p):
+        print('-- skip (missing): %s' % p)
+        continue
+    with ropen(p) as f:
+        mk = f.read()
+    if gate in mk:
+        mk = re.sub(r'(?m)^\s*\$\(error Please wait susfs update[^\n]*(?:\n|\Z)', '', mk)
+        with wopen(p) as f:
+            f.write(mk)
+        print('OK  %s: gate removed (realpath=%s)' % (p, os.path.realpath(p)))
+        patched_any = True
+    else:
+        print('OK  %s: no gate present (realpath=%s)' % (p, os.path.realpath(p)))
+        patched_any = True
+    # verify by re-reading
+    with ropen(p) as f:
+        back = f.read()
+    if gate in back:
+        print('FATAL: %s still contains the gate after patching' % p)
+        sys.exit(1)
+for p in cands:
+    if os.path.exists(p):
+        with ropen(p) as f:
+            if gate in f.read():
+                print('FATAL: %s STILL contains the gate' % p)
+                sys.exit(1)
+print('OK  susfs update gate verified removed everywhere')
 
 # ---------------------------------------------------------------------------
 # 1. fs/namei.c + fs/internal.h: expose filename_lookup()
