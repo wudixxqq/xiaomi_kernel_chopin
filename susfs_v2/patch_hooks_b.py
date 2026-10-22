@@ -554,33 +554,47 @@ if need('fs/exec.c'):
         ex = f.read()
     if 'susfs_is_sdcard_android_data_not_decrypted' in ex:
         lines = ex.split('\n')
-        keep, i = [], 0
+        # Operate ONLY inside the injected hook block: from the
+        # susfs_is_current_proc_no_su() line to its following orig_flow: label.
+        start = end = None
+        for i, L in enumerate(lines):
+            if 'susfs_is_current_proc_no_su()' in L:
+                start = i
+            elif start is not None and L.strip() == 'orig_flow:':
+                end = i
+                break
+        if start is None or end is None:
+            fatal('exec.c: hook block (proc_no_su .. orig_flow) not found')
         removed = 0
-        while i < len(lines):
-            L = lines[i]
-            if 'susfs_is_sdcard_android_data_not_decrypted' in L:
-                removed += 1
-                i += 1
-                continue
-            if re.match(r'^\s*is_su_session = !ksu_handle_execveat\(', L):
-                removed += 1
-                i += 1
-                continue
-            if L.strip() == 'else':
-                keep.append(L)
-                removed += 1
-                i += 1
-                continue
+        keep = []
+        for i, L in enumerate(lines):
+            if start < i < end:
+                if 'susfs_is_sdcard_android_data_not_decrypted' in L:
+                    removed += 1
+                    continue
+                if re.match(r'^\s*is_su_session = !ksu_handle_execveat\(', L):
+                    removed += 1
+                    continue
+                if L.strip() == 'else':
+                    removed += 1
+                    continue
             keep.append(L)
-            i += 1
         ex = '\n'.join(keep)
+        # extern declaration for the dropped static key (file scope)
+        ex = re.sub(r'(?m)^extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\r?\n', '', ex)
         if 'susfs_is_sdcard_android_data_not_decrypted' in ex:
             fatal('exec.c: sdcard symbol still present after cleanup')
-        if removed < 4:
-            fatal('exec.c: expected >=4 lines removed, got %d' % removed)
+        if removed < 3:
+            fatal('exec.c: expected >=3 lines removed inside hook block, got %d' % removed)
         with wopen('fs/exec.c') as f:
             f.write(ex)
-        out('OK  fs/exec.c: sdcard branch dropped (%d lines removed)' % removed)
+        out('OK  fs/exec.c: sdcard branch dropped (%d lines removed in block)' % removed)
+        # sanity: the resulting sucompat call must still be there
+        with ropen('fs/exec.c') as f:
+            ex2 = f.read()
+        if 'is_su_session = !ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);' not in ex2:
+            fatal('exec.c: sucompat call missing after cleanup')
+        out('OK  fs/exec.c: sucompat call retained')
     else:
         out('-- fs/exec.c: no sdcard symbol, skip')
 
