@@ -31,6 +31,12 @@ jobs:
           ref: ${{ inputs.kernel_ref }}
           path: kernel
 
+      - name: Checkout CI compat assets
+        uses: actions/checkout@v4
+        with:
+          ref: backport-4.14.336-A15-etc
+          path: ci
+
       - name: Download stock boot image
         run: |
           mkdir -p boot
@@ -47,238 +53,24 @@ jobs:
             build-essential flex bison libssl-dev libelf-dev \
             bc cpio rsync zip unzip ccache python3
 
-      - name: Setup ReSukiSU CI 35236 (commit dac2d18)
+      - name: Setup BakaSU CI 35236 (commit dac2d18)
         working-directory: kernel
         run: |
           rm -rf drivers/kernelsu
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s dac2d186406a0d2b0ce3c67cad5a1fa1adbf9f4d
           grep -E "^config KSU_MANUAL_HOOK|^config KSU_SUSFS" drivers/kernelsu/Kconfig || true
 
-      - name: Adapt kernel manual hooks for ReSukiSU
-        working-directory: kernel
+      - name: Apply susfs compat (v2 dispatch shim + susfs-style hooks)
         run: |
-          python3 - <<'EOF'
-          import os, re, sys
-
-          FORBIDDEN = ['ksu_vfs_read_hook', 'ksu_execveat_hook', 'ksu_handle_vfs_read']
-          BLOCK_START = re.compile(r'#(ifdef\s+CONFIG_KSU\s*|if\s+defined\(CONFIG_KSU\)\s*)$')
-
-          def ropen(p):
-              return open(p, encoding='utf-8', errors='surrogateescape')
-
-          def wopen(p):
-              return open(p, 'w', encoding='utf-8', errors='surrogateescape')
-
-          def iter_sources():
-              for root, dirs, files in os.walk('.'):
-                  dirs[:] = [d for d in dirs
-                             if d not in ('out', '.git', 'KernelSU')]
-                  for fn in files:
-                      if fn.endswith(('.c', '.h')):
-                          yield os.path.join(root, fn)
-
-          # --- Phase 0: decouple the hook-method choice in kernelsu Kconfig ---
-          # choice { TRACEPOINT / MANUAL / SUSFS } is mutually exclusive and
-          # defconfig already picks KSU_SUSFS, which silently drops KSU_MANUAL_HOOK.
-          # Convert the choice into three independent bools.
-          p = 'drivers/kernelsu/Kconfig'
-          with ropen(p) as f:
-              lines = f.readlines()
-          out, i, n = [], 0, len(lines)
-          decoupled = 0
-          while i < n:
-              if lines[i].strip() == 'choice' and i + 1 < n and 'KernelSU Hooking Method' in lines[i + 1]:
-                  j = i
-                  while j < n and lines[j].strip() != 'endchoice':
-                      j += 1
-                  assert j < n, 'endchoice not found'
-                  k = i
-                  while k < j and not lines[k].strip().startswith('config '):
-                      k += 1
-                  assert k < j, 'no config inside choice'
-                  out.extend(lines[k:j])
-                  decoupled += 1
-                  i = j + 1
-                  continue
-              out.append(lines[i])
-              i += 1
-          assert decoupled == 1, 'hook-method choice not found'
-          with wopen(p) as f:
-              f.writelines(out)
-          txt = ''.join(out)
-          assert 'config KSU_MANUAL_HOOK' in txt and 'config KSU_SUSFS' in txt
-          assert not re.search(r'(?m)^\s*choice\s*$', txt)
-          print('kernelsu/Kconfig hook choice decoupled')
-
-          # --- Phase 1: fs/exec.c gate -> single ksu_handle_execveat() call ---
-          p = 'fs/exec.c'
-          with ropen(p) as f:
-              lines = f.readlines()
-          lines = [l for l in lines if 'extern bool ksu_execveat_hook' not in l]
-          out, i, replaced = [], 0, 0
-          while i < len(lines):
-              l = lines[i]
-              if 'if (unlikely(ksu_execveat_hook))' in l:
-                  indent = l[:len(l) - len(l.lstrip())]
-                  j = i + 1
-                  while j < len(lines) and 'ksu_handle_execveat_sucompat(&fd' not in lines[j]:
-                      j += 1
-                  out.append(indent + 'ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n')
-                  replaced += 1
-                  i = j + 1
-                  continue
-              out.append(l)
-              i += 1
-          assert replaced == 1, 'exec.c gate not found'
-          with wopen(p) as f:
-              f.writelines(out)
-          print('fs/exec.c gate replaced:', replaced)
-
-          # --- Phase 2: strip only the forbidden vfs_read hook (read_write.c) ---
-          removed_total = 0
-          for path in iter_sources():
-              with open(path, 'rb') as f:
-                  if b'\x00' in f.read(4096):
-                      continue
-              with ropen(path) as f:
-                  lines = f.readlines()
-              src_all = ''.join(lines)
-              if 'ksu_vfs_read_hook' not in src_all:
-                  continue
-              out, i, removed = [], 0, 0
-              while i < len(lines):
-                  if BLOCK_START.match(lines[i].strip()):
-                      j, depth = i, 1
-                      while j + 1 < len(lines) and depth:
-                          j += 1
-                          s = lines[j].strip()
-                          if s.startswith('#if'):
-                              depth += 1
-                          elif s == '#endif':
-                              depth -= 1
-                      text = ''.join(lines[i:j+1])
-                      if any(m in text for m in FORBIDDEN):
-                          removed += 1
-                          i = j + 1
-                          continue
-                  out.append(lines[i])
-                  i += 1
-              with wopen(path) as f:
-                  f.writelines(out)
-              removed_total += removed
-              print('stripped', path, removed)
-          print('total stripped:', removed_total)
-
-          # --- Phase 3: kernel/reboot.c supercall entry ---
-          p = 'kernel/reboot.c'
-          with ropen(p) as f:
-              src = f.read()
-          anchor = 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'
-          assert anchor in src, 'reboot anchor missing'
-          ins = ('#ifdef CONFIG_KSU_MANUAL_HOOK\n'
-                 'extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n'
-                 '#endif\n')
-          idx = src.index(anchor)
-          src = src[:idx] + ins + src[idx:]
-          idx2 = src.index('SYSCALL_DEFINE4(reboot')
-          seg = src[idx2:]
-          a2 = 'int ret = 0;'
-          k = seg.index(a2) + len(a2)
-          ls = src.rfind('\n', 0, idx2 + k) + 1
-          call = '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n'
-          src = src[:ls] + call + src[ls:]
-          with wopen(p) as f:
-              f.write(src)
-          assert src.count('ksu_handle_sys_reboot') == 2
-          print('kernel/reboot.c patched')
-
-          # --- Phase 4: fs/stat.c add newfstat_ret + fstat64_ret hooks ---
-          p = 'fs/stat.c'
-          with ropen(p) as f:
-              src = f.read()
-
-          ext1 = ('#ifdef CONFIG_KSU_MANUAL_HOOK\n'
-                  'extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n'
-                  '#endif\n')
-          a1 = 'SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)'
-          assert a1 in src, 'newfstat anchor missing'
-          src = src[:src.index(a1)] + ext1 + src[src.index(a1):]
-          idx = src.index(a1)
-          k = src.index('return error;', idx)
-          ls = src.rfind('\n', 0, k) + 1
-          src = src[:ls] + '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n' + src[ls:]
-
-          ext2 = ('#ifdef CONFIG_KSU_MANUAL_HOOK\n'
-                  'extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n'
-                  '#endif\n')
-          a2s = 'SYSCALL_DEFINE2(fstat64, unsigned long, fd'
-          assert a2s in src, 'fstat64 anchor missing'
-          src = src[:src.index(a2s)] + ext2 + src[src.index(a2s):]
-          idx = src.index(a2s)
-          k = src.index('return error;', idx)
-          ls = src.rfind('\n', 0, k) + 1
-          src = src[:ls] + '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n' + src[ls:]
-
-          with wopen(p) as f:
-              f.write(src)
-          assert src.count('ksu_handle_newfstat_ret') == 2
-          assert src.count('ksu_handle_fstat64_ret') == 2
-          print('fs/stat.c ret hooks added')
-
-          # --- Phase 4b: fs/notify/fdinfo.c susfs merge fix ---
-          # susfs patch leaves `out_seq_printf:` label directly before a variable
-          # declaration, which is illegal before C23 and breaks 4.14 builds.
-          # Applied unconditionally; harmless when susfs is compiled out.
-          p = 'fs/notify/fdinfo.c'
-          with ropen(p) as f:
-              lines = f.readlines()
-          out, fixed = [], 0
-          for idx, l in enumerate(lines):
-              out.append(l)
-              if l.strip() == 'out_seq_printf:' and fixed == 0:
-                  nxt = lines[idx + 1].strip() if idx + 1 < len(lines) else ''
-                  if nxt != ';':
-                      out.append('\t;\n')
-                  fixed += 1
-          assert fixed == 1, 'fdinfo out_seq_printf label not found'
-          with wopen(p) as f:
-              f.writelines(out)
-          print('fs/notify/fdinfo.c label fix applied')
-
-          # --- Phase 5: verify required hooks present, forbidden absent ---
-          required = {
-              'fs/exec.c': ['ksu_handle_execveat(&fd'],
-              'fs/open.c': ['ksu_handle_faccessat(&dfd'],
-              'fs/stat.c': ['ksu_handle_stat(&dfd', 'ksu_handle_newfstat_ret(&fd', 'ksu_handle_fstat64_ret(&fd'],
-              'drivers/input/input.c': ['ksu_handle_input_handle_event(&type'],
-              'kernel/reboot.c': ['ksu_handle_sys_reboot(magic1'],
-              'fs/notify/fdinfo.c': ['out_seq_printf:'],
-          }
-          for path, needles in required.items():
-              with ropen(path) as f:
-                  src = f.read()
-              for nd in needles:
-                  assert nd in src, '%s missing %s' % (path, nd)
-              print('OK', path)
-          bad = []
-          for path in iter_sources():
-              with open(path, 'rb') as f:
-                  if b'\x00' in f.read(4096):
-                      continue
-              with ropen(path) as f:
-                  for ln, line in enumerate(f, 1):
-                      if any(m in line for m in FORBIDDEN):
-                          bad.append('%s:%d: %s' % (path, ln, line.strip()))
-          if bad:
-              print('FORBIDDEN SYMBOLS LEFT:')
-              print('\n'.join(bad))
-              sys.exit(1)
-          print('VERIFICATION CLEAN')
-          EOF
+          python3 ci/susfs_compat/patch_hooks.py
+          cp ci/susfs_compat/susfs.c        kernel/fs/susfs.c
+          cp ci/susfs_compat/susfs.h        kernel/include/linux/susfs.h
+          cp ci/susfs_compat/susfs_def.h    kernel/include/linux/susfs_def.h
+          cp ci/susfs_compat/susfs_compat.c kernel/fs/susfs_compat.c
           echo "--- verify ---"
-          grep -n "ksu_handle_execveat(&fd" fs/exec.c
-          grep -n "ksu_handle_sys_reboot" kernel/reboot.c
-          grep -c "ksu_handle" fs/stat.c fs/open.c drivers/input/input.c fs/inode.c
+          grep -n "obj-.*susfs" kernel/fs/Makefile
+          grep -n "susfs_compat_init" kernel/fs/susfs.c | head -2
+          grep -c "void __user \*\*" kernel/include/linux/susfs.h
 
       - name: Configure kernel
         working-directory: kernel
@@ -296,20 +88,41 @@ jobs:
             -d COMMON_CLK_MT8183 \
             -d PINCTRL_MT8183 \
             -d MTK_AEE_IPANIC
-          # ReSukiSU CI 35236: manual hook + LSM auto setuid/initrc.
-          # KSU_SUSFS disabled: the kernel's susfs integration is the legacy
-          # direct-call API (no CMD_*/susfs_cmd dispatcher) and is incompatible
-          # with ReSukiSU's susfs command dispatch; enabling it breaks the build.
+
+          # SUSFS route: KSU_SUSFS hook mode (mutually exclusive with MANUAL_HOOK).
+          # TRY_UMOUNT off: legacy ksu_try_umount() symbol does not exist in
+          # BakaSU; module umounts via its own kernel_umount path.
+          # SUS_MAP off / SUS_SU off: no v1.5.5 backend, shim answers -EOPNOTSUPP.
           scripts/config --file out/.config \
             -e KPROBES -e KPROBE_EVENTS \
-            -e KSU -e KSU_MANUAL_HOOK \
-            -e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-            -e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
-            -d KSU_SUSFS
+            -e KSU -e KSU_SUSFS \
+            -e KSU_SUSFS_SUS_PATH \
+            -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT \
+            -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_ENABLE_LOG \
+            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            -e KSU_SUSFS_OPEN_REDIRECT \
+            -d KSU_SUSFS_TRY_UMOUNT \
+            -d KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+            -d KSU_SUSFS_SUS_MAP \
+            -d KSU_SUSFS_SUS_SU \
+            -d KSU_SUSFS_SUS_OVERLAYFS \
+            -d KSU_MANUAL_HOOK
           make O=out ARCH=arm64 olddefconfig
-          grep -E "^CONFIG_(KSU|KSU_MANUAL_HOOK|KPROBES|OVERLAY_FS|EXT4_FS)" out/.config || true
-          grep -q "^CONFIG_KSU_MANUAL_HOOK=y" out/.config || { echo "FATAL: CONFIG_KSU_MANUAL_HOOK dropped by olddefconfig"; exit 1; }
-          grep -Eq "^# CONFIG_KSU_SUSFS is not set|^CONFIG_KSU_SUSFS=n" out/.config || { echo "FATAL: CONFIG_KSU_SUSFS not disabled"; exit 1; }
+
+          echo "--- final SUSFS config ---"
+          grep -E "^CONFIG_KSU" out/.config || true
+          grep -q "^CONFIG_KSU=y" out/.config || { echo "FATAL: CONFIG_KSU dropped"; exit 1; }
+          grep -q "^CONFIG_KSU_SUSFS=y" out/.config || { echo "FATAL: CONFIG_KSU_SUSFS dropped by olddefconfig"; exit 1; }
+          grep -Eq "^# CONFIG_KSU_MANUAL_HOOK is not set|^CONFIG_KSU_MANUAL_HOOK=n" out/.config || { echo "FATAL: CONFIG_KSU_MANUAL_HOOK still enabled"; exit 1; }
+          for opt in SUS_PATH SUS_MOUNT SUS_KSTAT SPOOF_UNAME ENABLE_LOG HIDE_KSU_SUSFS_SYMBOLS SPOOF_CMDLINE_OR_BOOTCONFIG OPEN_REDIRECT; do
+            grep -q "^CONFIG_KSU_SUSFS_${opt}=y" out/.config || { echo "FATAL: CONFIG_KSU_SUSFS_${opt} dropped"; exit 1; }
+          done
+          grep -q "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" out/.config && { echo "FATAL: TRY_UMOUNT must be off"; exit 1; } || true
 
       - name: Build kernel Image
         working-directory: kernel
@@ -359,5 +172,5 @@ jobs:
           gh release create "$tag" \
             work/boot-chopin-a13.img \
             work/boot-chopin-a13.img.sha256 \
-            --title "chopin Android 13 kernel + ReSukiSU ($tag)" \
-            --notes "kernel: ${{ inputs.kernel_ref }} (4.14.186-g0dc1d312efb3) | ReSukiSU: CI 35236 / commit dac2d18 (manual hook) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: ReSukiSU CI 35236"
+            --title "chopin Android 13 kernel + BakaSU + SUSFS ($tag)" \
+            --notes "kernel: ${{ inputs.kernel_ref }} (4.14.186-g0dc1d312efb3) | BakaSU: CI 35236 / commit dac2d18 (SUSFS hook mode) | susfs kernel-side: v1.5.5 + v2 dispatch compat shim | boot base: MIUI V14.0.8.0.TKPCNXM | manager: BakaSU CI 35236"
