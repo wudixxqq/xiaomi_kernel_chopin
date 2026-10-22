@@ -51,7 +51,7 @@ jobs:
         working-directory: kernel
         run: |
           rm -rf drivers/kernelsu
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s v4.2.0-rc3
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s 8770c7e324a22895703c4916b8a16520e0b81c79
           grep -E "^config KSU_MANUAL_HOOK|^config KSU_SUSFS" drivers/kernelsu/Kconfig || true
 
       - name: Adapt kernel manual hooks for ReSukiSU
@@ -300,4 +300,4 @@ jobs:
             work/boot-chopin-a13.img \
             work/boot-chopin-a13.img.sha256 \
             --title "chopin Android 13 kernel + ReSukiSU ($tag)" \
-            --notes "kernel: ${{ inputs.kernel_ref }} | ReSukiSU: v4.2.0-rc3 (manual hook, SUSFS) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: ReSukiSU_v4.2.0-rc3"
+            --notes "kernel: ${{ inputs.kernel_ref }} | ReSukiSU: CI 35203 / commit 8770c7e (manual hook, SUSFS) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: ReSukiSU_v4.2.0-rc3_35203 (CI)"
