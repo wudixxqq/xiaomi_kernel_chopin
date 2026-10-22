@@ -18,6 +18,9 @@ permissions:
 
 env:
   BOOT_ZIP_URL: "https://github.com/wudixxqq/xiaomi_kernel_chopin/releases/download/ci-assets/boot.zip"
+  # 固定构建时间戳（stock MIUI 内核日期）：UTS_VERSION/linux_banner 在
+  # compile.h 生成时取此值，/proc/version 与 uname -v 原生显示该日期
+  KBUILD_BUILD_TIMESTAMP: "Mon Jul 10 04:21:53 UTC 2023"
 
 jobs:
   build:
