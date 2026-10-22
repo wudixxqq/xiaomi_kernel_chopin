@@ -531,10 +531,14 @@ if re.search(r'(?m)^\+\+[^+]', jtext.split('diff --git', 1)[1] if 'diff --git' i
 if re.search(r'(?m)^diff --git .*/\.git/', jtext):
     fatal('Jack patch contains .git/ sections (upstream pollution)')
 run_patch_sections(jack_patch, '',
-                   excludes=('fs/notify/fdinfo.c', 'kernel/sys.c'),
+                   excludes=('kernel/sys.c',),
                    # task_mmu hunks 1/5/6 reject exactly like on rosemary
                    # (include + cosmetics); fix_susfs_task_mmu.py repairs them.
-                   expect_fail=(('fs/proc/task_mmu.c', '3 out of 8 hunks FAILED'),))
+                   # fdinfo hunk 4 (inotify body) rejects on 4.14.186 - the
+                   # hunks 1/2/3 (include + dual signatures) DO apply; we port
+                   # the body manually in step [10].
+                   expect_fail=(('fs/proc/task_mmu.c', '3 out of 8 hunks FAILED'),
+                                ('fs/notify/fdinfo.c', '1 out of 4 hunks FAILED')))
 
 for p in ('fs/susfs.c', 'include/linux/susfs.h', 'include/linux/susfs_def.h'):
     if not os.path.exists(p):
@@ -690,12 +694,13 @@ if need('fs/notify/fdinfo.c'):
         with ropen('fs/notify/fdinfo.c') as f:
             fd2 = f.read()
         for marker in ('susfs_is_current_app_uid', 'susfs_is_current_proc_umounted',
-                       'orig_flow:'):
+                       'orig_flow:', 'susfs_def.h',
+                       'static void inotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark, struct file *file)'):
             if marker not in fd2:
                 fatal('fdinfo.c: expected marker %r missing after port' % marker)
         if 'inotify_mark_user_mask' in fd2:
             fatal('fdinfo.c: 4.20 API inotify_mark_user_mask leaked into port')
-        out('OK  fdinfo.c: manual port verified')
+        out('OK  fdinfo.c: manual port verified (hunks 1/2/3 applied + body ported)')
 
 # ===========================================================================
 next_step('kernel/sys.c: manual port of SPOOF_UNAME (bpfloader context)')
@@ -755,7 +760,8 @@ for fx in ('fix_susfs_task_mmu.py', 'fix_susfs_414.py'):
     if r.returncode != 0:
         fatal('%s exited %d' % (fx, r.returncode))
 # fixer repaired the include + guard; drop the tolerated reject files
-for rej in ('fs/proc/task_mmu.c.rej', 'patch_rejects/fs/proc/task_mmu.c.rej'):
+for rej in ('fs/proc/task_mmu.c.rej', 'patch_rejects/fs/proc/task_mmu.c.rej',
+            'fs/notify/fdinfo.c.rej', 'patch_rejects/fs/notify/fdinfo.c.rej'):
     if os.path.exists(rej):
         os.remove(rej)
         out('OK  removed tolerated reject %s' % rej)
