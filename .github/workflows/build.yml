@@ -163,4 +163,4 @@ jobs:
             work/boot-chopin-a13.img \
             work/boot-chopin-a13.img.sha256 \
             --title "chopin Android 13 kernel + BakaSU + SUSFS v2.3.0 ($tag)" \
-            --notes "kernel: ${{ inputs.kernel_ref }} (4.14.186-g0dc1d312efb3) | BakaSU: CI 35236 / commit dac2d18 (SUSFS hook mode) | susfs kernel-side: v2.3.0 (JackA1ltman 4.14 backport, all 9 features incl. SUS_MAP) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: BakaSU CI 35236"
+            --notes "kernel: ${{ inputs.kernel_ref }} (4.14.186-gaa24d707761c) | BakaSU: CI 35236 / commit dac2d18 (SUSFS hook mode) | susfs kernel-side: v2.3.0 (JackA1ltman 4.14 backport, all 9 features incl. SUS_MAP) | boot base: MIUI V14.0.8.0.TKPCNXM | manager: BakaSU CI 35236"
