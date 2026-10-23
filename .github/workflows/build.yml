@@ -18,12 +18,6 @@ permissions:
 
 env:
   BOOT_ZIP_URL: "https://github.com/wudixxqq/xiaomi_kernel_chopin/releases/download/ci-assets/boot.zip"
-  # 伪装 stock MIUI 内核 banner（参考 boot_a.img 同源配方）：
-  # UTS_VERSION/linux_banner 在 compile.h 生成时取这些值，
-  # /proc/version 与 uname -v 原生显示该日期与 builder@host
-  KBUILD_BUILD_TIMESTAMP: "Mon Jul 10 04:21:53 UTC 2023"
-  KBUILD_BUILD_USER: "builder"
-  KBUILD_BUILD_HOST: "pangu-build-component-vendor-112591-0qwdh-8xc5r-vwwfc"
 
 jobs:
   build:
@@ -79,8 +73,11 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             chopin_defconfig
 
-          # stock MIUI kernel version string: 4.14.186-g0dc1d312efb3
-          scripts/config --file out/.config --set-str LOCALVERSION "-g0dc1d312efb3"
+          # stock MIUI kernel version string: 4.14.186-gaa24d707761c
+          # (vendor module vermagic /vendor/lib/modules/*.ko = 4.14.186-gaa24d707761c;
+          #  Hunter-class detectors cross-check /proc/sys/kernel/osrelease vs vermagic,
+          #  so the kernel release MUST equal the stock one - no spoofing involved)
+          scripts/config --file out/.config --set-str LOCALVERSION "-gaa24d707761c"
           scripts/config --file out/.config -d DEBUG_INFO
           scripts/config --file out/.config \
             -d COMMON_CLK_MT8168 \
