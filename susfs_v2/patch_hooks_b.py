@@ -275,6 +275,44 @@ if not seen_real:
 out('OK  susfs update gate verified removed everywhere')
 
 # ===========================================================================
+next_step('install BakaSU selinux_hide.c with policy read masking')
+# /sys/fs/selinux/policy read masking: serve apps the pristine backup policy
+# binary instead of the live one, killing policy-dump based detection of
+# module injected rules (e.g. "fsck_untrusted sys_admin" keywords).
+sh_file = os.path.join(ASSET_DIR, 'selinux_hide.c')
+if not os.path.exists(sh_file):
+    fatal('%s missing (policy masking asset)' % sh_file)
+cands = ['drivers/kernelsu/feature/selinux_hide.c',
+         'KernelSU/kernel/feature/selinux_hide.c']
+seen_real = set()
+for p in cands:
+    if not os.path.exists(p):
+        out('-- skip (missing): %s' % p)
+        continue
+    real = os.path.realpath(p)
+    if real in seen_real:
+        out('-- skip (same file via symlink): %s' % p)
+        continue
+    seen_real.add(real)
+    shutil.copyfile(sh_file, p)
+    with ropen(p) as f:
+        c = f.read()
+    for marker in ('ksu_build_policy_cache', 'hook_selinux_policy_ops',
+                   'my_sel_open_policy', 'my_sel_read_policy',
+                   'sel_policy_ops', 'ksu_policy_load_memory'):
+        if marker not in c:
+            fatal('%s: marker %s missing after install' % (p, marker))
+    if c.count('{') != c.count('}'):
+        fatal('%s: unbalanced braces after install' % p)
+    out('OK  %s: policy masking installed (realpath=%s, %d bytes)'
+        % (p, real, len(c.encode("utf-8", errors="surrogateescape"))))
+if not seen_real:
+    if ALLOW_MISSING:
+        out('-- SKIP selinux_hide install (simulation, no module tree)')
+    else:
+        fatal('no selinux_hide.c found in either module path')
+
+# ===========================================================================
 next_step('revert in-tree susfs v1.5.5 (official kernel-4.14 patch, -R)')
 # fdinfo.c / kernel/sys.c / task_mmu.c / readdir.c reverted manually in step
 # [4]: miui-tree context differences make some stock hunks fail there.
